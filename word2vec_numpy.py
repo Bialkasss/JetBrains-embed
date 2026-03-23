@@ -1,5 +1,5 @@
 """
-word2vec — Skip-Gram with Negative Sampling (SGNS)
+word2vec — Skip-Gram & CBOW with Negative Sampling (SGNS)
 Pure NumPy implementation — no ML frameworks.
 
 Dataset options
@@ -9,53 +9,14 @@ Dataset options
 
 Usage examples
 ──────────────
-  # Built-in corpus (default)
+  # Built-in corpus (Skip-gram by default)
   python word2vec_numpy.py
 
-  # Wikipedia: fetch a few articles by title
-  python word2vec_numpy.py --wikipedia "Machine learning" "Neural network" "Linguistics"
+  # Run CBOW on the built-in corpus
+  python word2vec_numpy.py --mode cbow
 
-  # Wikipedia: fetch articles from a category
-  python word2vec_numpy.py --wiki-category "Artificial intelligence" --category-limit 10
-
-  # Tune hyperparameters
-  python word2vec_numpy.py --wikipedia "Physics" "Chemistry" \\
-      --dim 100 --epochs 30 --window 5 --neg 10
-
-═══════════════════════════════════════════════════════
-  MATHEMATICAL DERIVATION
-═══════════════════════════════════════════════════════
-
-Model
-─────
-Two embedding matrices:
-  W_in  : (V, D)   centre-word  embeddings   (input)
-  W_out : (V, D)   context-word embeddings   (output)
-
-For each (centre c, positive context o) pair we sample K
-"negative" context words n_1 … n_K ~ P_noise (unigram^0.75).
-
-Objective (maximise log-likelihood → minimise loss):
-  L = -log σ(v_c · v̂_o)  −  Σ_{k=1}^{K} log σ(−v_c · v̂_{n_k})
-
-where σ(x) = 1 / (1 + e^{-x}).
-
-Gradients
-─────────
-Define  s_pos = σ( v_c · v̂_o)          positive similarity
-        s_k   = σ(-v_c · v̂_{n_k})      negative similarities  (K,)
-
-∂L/∂v̂_o
-  = (s_pos − 1) · v_c                                          (D,)
-
-∂L/∂v̂_{n_k}
-  = (1 − s_k) · v_c                                            (D,) each
-
-∂L/∂v_c
-  = (s_pos − 1) · v̂_o  −  Σ_k (1 − s_k) · v̂_{n_k}           (D,)
-
-Parameters are updated with SGD + linear LR decay:
-  lr(t) = max(lr_min,  lr_init * (1 − t / T))
+  # Wikipedia: fetch a few articles and use CBOW
+  python word2vec_numpy.py --mode cbow --wikipedia "Machine learning" "Neural network"
 """
 
 import numpy as np
@@ -67,13 +28,8 @@ import sys
 from collections import Counter
 
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # 0.  STOP WORDS
-#     Standard English stop words that carry syntactic glue but very little
-#     semantic content. Filtering them stops high-frequency function words
-#     from dominating nearest-neighbour results on Wikipedia corpora.
-#     Active by default; disable with --keep-stopwords.
 # ─────────────────────────────────────────────────────────────────────────────
 
 STOP_WORDS = frozenset("""
@@ -88,6 +44,7 @@ then there these they this those through to too under until up very was
 we were what when where which while who whom why will with would you
 your yours yourself yourselves
 """.split())
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 1.  BUILT-IN CORPUS
@@ -147,7 +104,6 @@ technology changes how people work and live and communicate
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _wiki_request(url: str, timeout: int = 15) -> dict:
-    """Make a GET request to the Wikipedia API. Returns parsed JSON."""
     import urllib.request
     req = urllib.request.Request(
         url,
@@ -158,20 +114,6 @@ def _wiki_request(url: str, timeout: int = 15) -> dict:
 
 
 def fetch_wikipedia_article(title: str, verbose: bool = True) -> str:
-    """
-    Fetch the full plain-text of a Wikipedia article using the free
-    Wikipedia REST API (no API key required).
-
-    Parameters
-    ----------
-    title   : article title, e.g. "Machine learning"
-    verbose : print progress
-
-    Returns
-    -------
-    Plain text of the article (may be several thousand tokens).
-    """
-    # Encode spaces as underscores for the URL
     slug = title.strip().replace(" ", "_")
     url  = f"https://en.wikipedia.org/api/rest_v1/page/summary/{slug}"
 
@@ -191,11 +133,7 @@ def fetch_wikipedia_article(title: str, verbose: bool = True) -> str:
         return ""
 
 
-def fetch_wikipedia_articles(titles: list[str],
-                              verbose: bool = True) -> str:
-    """
-    Fetch multiple Wikipedia articles and concatenate their text.
-    """
+def fetch_wikipedia_articles(titles: list[str], verbose: bool = True) -> str:
     parts = []
     for title in titles:
         text = fetch_wikipedia_article(title, verbose=verbose)
@@ -208,19 +146,10 @@ def fetch_wikipedia_articles(titles: list[str],
     return combined
 
 
-def fetch_wikipedia_category(category: str,
-                              limit:    int  = 10,
-                              verbose:  bool = True) -> str:
-    """
-    Fetch up to `limit` article titles from a Wikipedia category,
-    then pull each article's summary text.
-
-    Uses the MediaWiki Action API (also free, no key required).
-    """
+def fetch_wikipedia_category(category: str, limit: int = 10, verbose: bool = True) -> str:
     if verbose:
         print(f"  Fetching category '{category}' (up to {limit} articles)…")
 
-    # Query the category members
     base = "https://en.wikipedia.org/w/api.php"
     params = (
         f"?action=query&list=categorymembers"
@@ -246,20 +175,14 @@ def fetch_wikipedia_category(category: str,
 # 3.  TEXT PREPROCESSING
 # ─────────────────────────────────────────────────────────────────────────────
 
-def tokenise(text: str,
-             remove_stopwords: bool = False) -> list[str]:
-    """
-    Lowercase, split on non-alphabetic characters.
-    If remove_stopwords=True, discard tokens in STOP_WORDS.
-    """
+def tokenise(text: str, remove_stopwords: bool = False) -> list[str]:
     tokens = re.findall(r"[a-z]+", text.lower())
     if remove_stopwords:
         tokens = [t for t in tokens if t not in STOP_WORDS]
     return tokens
 
 
-def build_vocab(tokens: list[str],
-                min_count: int = 2) -> tuple[dict, dict, list]:
+def build_vocab(tokens: list[str], min_count: int = 2) -> tuple[dict, dict, list]:
     counts   = Counter(tokens)
     vocab    = [w for w, c in counts.most_common() if c >= min_count]
     word2idx = {w: i for i, w in enumerate(vocab)}
@@ -267,12 +190,7 @@ def build_vocab(tokens: list[str],
     return word2idx, idx2word, vocab
 
 
-def subsample(tokens:    list[str],
-              word2idx:  dict,
-              counts:    Counter,
-              total:     int,
-              t:         float = 1e-3) -> list[str]:
-    """Frequent-word sub-sampling (Mikolov et al. 2013)."""
+def subsample(tokens: list[str], word2idx: dict, counts: Counter, total: int, t: float = 1e-3) -> list[str]:
     rng  = np.random.default_rng(42)
     kept = []
     for w in tokens:
@@ -285,19 +203,14 @@ def subsample(tokens:    list[str],
     return kept
 
 
-def build_unigram_table(vocab:      list[str],
-                         counts:    Counter,
-                         table_size: int = 100_000) -> np.ndarray:
-    """Noise distribution P(w) ∝ freq(w)^0.75 for negative sampling."""
+def build_unigram_table(vocab: list[str], counts: Counter, table_size: int = 100_000) -> np.ndarray:
     freqs  = np.array([counts[w] ** 0.75 for w in vocab], dtype=np.float64)
     freqs /= freqs.sum()
     return np.random.choice(len(vocab), size=table_size, p=freqs)
 
 
-def make_skipgram_pairs(token_ids: list[int],
-                        window:    int = 5) -> list[tuple[int, int]]:
-    """Generate (centre, context) pairs with dynamic window sampling."""
-    rng   = np.random.default_rng(0)
+def make_skipgram_pairs(token_ids: list[int], window: int = 5, seed: int = 0) -> list[tuple[int, int]]:
+    rng   = np.random.default_rng(seed)
     pairs = []
     n     = len(token_ids)
     for i, centre in enumerate(token_ids):
@@ -314,12 +227,9 @@ def make_skipgram_pairs(token_ids: list[int],
 # 4.  MODEL INITIALISATION
 # ─────────────────────────────────────────────────────────────────────────────
 
-def init_embeddings(vocab_size: int,
-                    embed_dim:  int,
-                    seed:       int = 42) -> tuple[np.ndarray, np.ndarray]:
+def init_embeddings(vocab_size: int, embed_dim: int, seed: int = 42) -> tuple[np.ndarray, np.ndarray]:
     rng   = np.random.default_rng(seed)
-    W_in  = rng.uniform(-0.5 / embed_dim, 0.5 / embed_dim,
-                        size=(vocab_size, embed_dim))
+    W_in  = rng.uniform(-0.5 / embed_dim, 0.5 / embed_dim, size=(vocab_size, embed_dim))
     W_out = np.zeros((vocab_size, embed_dim), dtype=np.float64)
     return W_in, W_out
 
@@ -335,16 +245,8 @@ def _sigmoid(x: np.ndarray) -> np.ndarray:
                     np.exp(x) / (1.0 + np.exp(x)))
 
 
-def sgns_step(centre_id:  int,
-              context_id: int,
-              neg_ids:    np.ndarray,
-              W_in:       np.ndarray,
-              W_out:      np.ndarray,
-              lr:         float) -> float:
-    """
-    One SGNS update.  All maths in the module docstring.
-    Mutates W_in and W_out in place.  Returns scalar loss.
-    """
+def sgns_step(centre_id: int, context_id: int, neg_ids: np.ndarray, 
+              W_in: np.ndarray, W_out: np.ndarray, lr: float) -> float:
     v_c   = W_in [centre_id ]
     v_o   = W_out[context_id]
     V_neg = W_out[neg_ids   ]
@@ -360,8 +262,7 @@ def sgns_step(centre_id:  int,
     # Gradients
     grad_v_o   = (s_pos - 1.0) * v_c
     grad_V_neg = (1.0 - s_neg[:, None]) * v_c
-    grad_v_c   = ((s_pos - 1.0) * v_o
-                  - np.sum((1.0 - s_neg[:, None]) * V_neg, axis=0))
+    grad_v_c   = ((s_pos - 1.0) * v_o - np.sum((1.0 - s_neg[:, None]) * V_neg, axis=0))
 
     # Clip
     clip = 5.0
@@ -377,11 +278,53 @@ def sgns_step(centre_id:  int,
     return float(loss)
 
 
+def cbow_step(center_id: int, context_ids: list[int], neg_ids: np.ndarray,
+              W_in: np.ndarray, W_out: np.ndarray, lr: float) -> float:
+    if not context_ids:
+        return 0.0
+    
+    # Context vectors (Input) and Center vector (Output/Target)
+    v_contexts = W_in[context_ids]
+    v_avg = np.mean(v_contexts, axis=0)
+    
+    v_target = W_out[center_id]
+    V_neg = W_out[neg_ids]
+
+    # Forward
+    s_pos = _sigmoid(v_avg @ v_target)
+    s_neg = _sigmoid(-V_neg @ v_avg)
+
+    # Loss
+    eps = 1e-10
+    loss = -np.log(s_pos + eps) - np.sum(np.log(s_neg + eps))
+
+    # Gradients
+    grad_v_target = (s_pos - 1.0) * v_avg
+    grad_V_neg = (1.0 - s_neg[:, None]) * v_avg
+    grad_v_avg = ((s_pos - 1.0) * v_target - np.sum((1.0 - s_neg[:, None]) * V_neg, axis=0))
+
+    # Clip
+    clip = 5.0
+    grad_v_target = np.clip(grad_v_target, -clip, clip)
+    grad_V_neg    = np.clip(grad_V_neg,    -clip, clip)
+    grad_v_avg    = np.clip(grad_v_avg,    -clip, clip)
+
+    # Update Output Weights
+    W_out[center_id] -= lr * grad_v_target
+    np.add.at(W_out, neg_ids, -lr * grad_V_neg)
+
+    # Update Input Weights (Divide gradient by number of context words)
+    W_in[context_ids] -= (lr * grad_v_avg) / len(context_ids)
+
+    return float(loss)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 6.  TRAINING LOOP
 # ─────────────────────────────────────────────────────────────────────────────
 
 def train(corpus_text:       str   = BUILTIN_CORPUS,
+          mode:               str   = "skipgram",
           embed_dim:          int   = 50,
           window:             int   = 5,
           n_neg:              int   = 5,
@@ -392,8 +335,9 @@ def train(corpus_text:       str   = BUILTIN_CORPUS,
           remove_stopwords:   bool  = False,
           seed:               int   = 42,
           verbose:            bool  = True) -> dict:
-    """Full training pipeline. Returns embeddings + metadata."""
+    
     np.random.seed(seed)
+    rng = np.random.default_rng(seed)
 
     tokens_raw  = tokenise(corpus_text, remove_stopwords=remove_stopwords)
     counts      = Counter(tokens_raw)
@@ -403,12 +347,28 @@ def train(corpus_text:       str   = BUILTIN_CORPUS,
 
     tokens_sub  = subsample(tokens_raw, word2idx, counts, total)
     token_ids   = [word2idx[w] for w in tokens_sub]
-    pairs       = make_skipgram_pairs(token_ids, window=window)
+
+    # Data preparation based on mode
+    if mode == "skipgram":
+        pairs = make_skipgram_pairs(token_ids, window=window, seed=seed)
+    else:
+        pairs = []
+        n_tokens = len(token_ids)
+        for i, center in enumerate(token_ids):
+            w = int(rng.integers(1, window + 1))
+            lo = max(0, i - w)
+            hi = min(n_tokens - 1, i + w)
+            # Gather surrounding words, excluding the center word itself
+            ctx = [token_ids[j] for j in range(lo, hi + 1) if j != i]
+            if ctx: 
+                pairs.append((center, ctx))
+
     n_pairs     = len(pairs)
     noise_table = build_unigram_table(vocab, counts)
 
     if verbose:
         print(f"{'─'*44}")
+        print(f"Architecture      : {mode.upper()}")
         print(f"Vocabulary size   : {V:,}")
         print(f"Tokens (raw)      : {total:,}")
         print(f"Tokens (subsampled): {len(tokens_sub):,}")
@@ -422,7 +382,6 @@ def train(corpus_text:       str   = BUILTIN_CORPUS,
     loss_history = []
     total_steps  = n_epochs * n_pairs
     step         = 0
-    rng          = np.random.default_rng(seed)
     t0           = time.time()
 
     for epoch in range(1, n_epochs + 1):
@@ -434,12 +393,21 @@ def train(corpus_text:       str   = BUILTIN_CORPUS,
             lr = max(lr_min, lr_init * (1.0 - step / total_steps))
 
             raw  = noise_table[rng.integers(0, len(noise_table), size=n_neg * 3)]
-            negs = raw[raw != o_id][:n_neg]
+            # Prevent sampling the positive context/target word as a negative
+            exclude_id = o_id if mode == "skipgram" else c_id
+            negs = raw[raw != exclude_id][:n_neg]
+            
             if len(negs) < n_neg:
                 negs = np.resize(negs, n_neg)
 
-            ep_loss += sgns_step(c_id, o_id, negs, W_in, W_out, lr)
-            step    += 1
+            if mode == "skipgram":
+                # c_id is center, o_id is a single context word ID
+                ep_loss += sgns_step(c_id, o_id, negs, W_in, W_out, lr)
+            else:
+                # c_id is target center, o_id is a list of context word IDs
+                ep_loss += cbow_step(c_id, o_id, negs, W_in, W_out, lr)
+
+            step += 1
 
         avg = ep_loss / n_pairs
         loss_history.append(avg)
@@ -457,11 +425,7 @@ def train(corpus_text:       str   = BUILTIN_CORPUS,
 # 7.  EVALUATION UTILITIES
 # ─────────────────────────────────────────────────────────────────────────────
 
-def most_similar(word:     str,
-                 E:        np.ndarray,
-                 word2idx: dict,
-                 idx2word: dict,
-                 topn:     int = 10) -> list[tuple[str, float]]:
+def most_similar(word: str, E: np.ndarray, word2idx: dict, idx2word: dict, topn: int = 10) -> list[tuple[str, float]]:
     if word not in word2idx:
         return []
     idx   = word2idx[word]
@@ -473,35 +437,14 @@ def most_similar(word:     str,
     return [(idx2word[i], float(sims[i])) for i in top]
 
 
-def analogy(a: str, b: str, c: str,
-            E:        np.ndarray,
-            word2idx: dict,
-            idx2word: dict,
-            topn:     int = 5) -> list[tuple[str, float]]:
-    """a : b :: c : ?   solved via v(b) − v(a) + v(c)."""
-    for w in (a, b, c):
-        if w not in word2idx:
-            return []
-    query  = E[word2idx[b]] - E[word2idx[a]] + E[word2idx[c]]
-    query /= np.linalg.norm(query) + 1e-10
-    norms  = np.linalg.norm(E, axis=1) + 1e-10
-    sims   = (E @ query) / norms
-    for w in (a, b, c):
-        sims[word2idx[w]] = -1.0
-    top = np.argsort(sims)[::-1][:topn]
-    return [(idx2word[i], float(sims[i])) for i in top]
-
-
 def print_results(result: dict, probes: list[str] = None) -> None:
     E        = result["embeddings"]
     word2idx = result["word2idx"]
     idx2word = result["idx2word"]
 
     if probes is None:
-        # Auto-pick up to 10 content words: skip stop words and very short tokens
         vocab = result["vocab"]
-        probes = [w for w in vocab
-                  if len(w) >= 4 and w not in STOP_WORDS][:10]
+        probes = [w for w in vocab if len(w) >= 4 and w not in STOP_WORDS][:10]
 
     print(f"\n{'═'*52}")
     print("  NEAREST NEIGHBOURS  (cosine similarity)")
@@ -524,40 +467,27 @@ def print_results(result: dict, probes: list[str] = None) -> None:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="word2vec Skip-Gram with Negative Sampling — pure NumPy",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  python word2vec_numpy.py
-      → built-in corpus (43 words, no internet needed)
-
-  python word2vec_numpy.py --wikipedia "Machine learning" "Deep learning" "NLP"
-      → fetch 3 Wikipedia articles (~2-5k tokens each)
-
-  python word2vec_numpy.py --wiki-category "Artificial intelligence" --category-limit 8
-      → fetch up to 8 articles from a Wikipedia category
-
-  python word2vec_numpy.py --wikipedia "Physics" --dim 100 --epochs 40 --neg 10
-        """)
+        description="word2vec Skip-Gram & CBOW with Negative Sampling — pure NumPy",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    
     # Dataset
     src = p.add_mutually_exclusive_group()
     src.add_argument("--wikipedia", nargs="+", metavar="TITLE",
                      help="Wikipedia article titles to fetch (space-separated)")
     src.add_argument("--wiki-category", metavar="CATEGORY",
                      help="Wikipedia category to pull articles from")
-    p.add_argument("--category-limit", type=int, default=10,
-                   help="Max articles to fetch from a category (default: 10)")
-    # Hyperparameters
+    
+    # Hyperparameters & Settings
+    p.add_argument("--mode",   type=str,   choices=["skipgram", "cbow"], default="skipgram", help="Model architecture (default: skipgram)")
+    p.add_argument("--category-limit", type=int, default=10, help="Max articles to fetch from a category (default: 10)")
     p.add_argument("--dim",    type=int,   default=50,    help="Embedding dimension (default: 50)")
     p.add_argument("--window", type=int,   default=5,     help="Context window (default: 5)")
     p.add_argument("--neg",    type=int,   default=5,     help="Negative samples per step (default: 5)")
     p.add_argument("--epochs", type=int,   default=50,    help="Training epochs (default: 50)")
     p.add_argument("--lr",     type=float, default=0.025, help="Initial learning rate (default: 0.025)")
     p.add_argument("--min-count", type=int, default=2,   help="Min token frequency for vocab (default: 2)")
-    p.add_argument("--keep-stopwords", action="store_true",
-                   help="Keep stop words in the vocabulary (default: filtered out for Wikipedia)")
-    p.add_argument("--probe",  nargs="*",  metavar="WORD",
-                   help="Words to show nearest neighbours for after training")
+    p.add_argument("--keep-stopwords", action="store_true", help="Keep stop words in the vocabulary")
+    p.add_argument("--probe",  nargs="*",  metavar="WORD", help="Words to show nearest neighbours for after training")
     return p
 
 
@@ -575,8 +505,7 @@ def main():
             corpus = BUILTIN_CORPUS
     elif args.wiki_category:
         print(f"\nFetching Wikipedia category: '{args.wiki_category}'…")
-        corpus = fetch_wikipedia_category(
-            args.wiki_category, limit=args.category_limit, verbose=True)
+        corpus = fetch_wikipedia_category(args.wiki_category, limit=args.category_limit, verbose=True)
         if not corpus.strip():
             print("No text fetched. Falling back to built-in corpus.\n")
             corpus = BUILTIN_CORPUS
@@ -584,18 +513,14 @@ def main():
         print("\nUsing built-in corpus (pass --wikipedia or --wiki-category for more text).\n")
         corpus = BUILTIN_CORPUS
 
-    # ── Auto-configure defaults for Wikipedia corpora ───────────────────────────
-    using_wiki      = bool(args.wikipedia or args.wiki_category)
-    remove_stopwords = not args.keep_stopwords   # default ON for any corpus
-
-    # If user didn't set --dim explicitly, suggest a sensible default
-    # based on corpus size: ~sqrt(V) rounded to nearest 25, clamped 50-300
-    explicit_dim    = args.dim  # argparse default is 50 — user may have kept it
+    using_wiki       = bool(args.wikipedia or args.wiki_category)
+    remove_stopwords = not args.keep_stopwords
 
     # ── Train ─────────────────────────────────────────────────────────────────
     result = train(
         corpus_text      = corpus,
-        embed_dim        = explicit_dim,
+        mode             = args.mode,
+        embed_dim        = args.dim,
         window           = args.window,
         n_neg            = args.neg,
         n_epochs         = args.epochs,
